@@ -2,6 +2,7 @@
 SQLite database — users, preferences, stats.
 """
 
+import os
 import sqlite3
 import logging
 from datetime import datetime
@@ -9,7 +10,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(__file__).parent / "bot_data.db"
+DB_PATH = Path(os.getenv("DB_PATH", str(Path(__file__).parent / "bot_data.db")))
 
 
 class Database:

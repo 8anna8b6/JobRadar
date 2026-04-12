@@ -1,9 +1,3 @@
-"""
-LinkedIn Jobs Telegram Bot — JobRadar
-Multi-select seniority + roles, immediate first scrape, daily at 1am Israel time.
-Direct company apply links via two-pass scraping.
-"""
-
 import logging
 import asyncio
 import json

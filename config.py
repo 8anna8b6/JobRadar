@@ -16,15 +16,14 @@ if env_path.exists():
 
 # ── Required ──────────────────────────────────────────────────────────────
 
-# Your Telegram bot token from @BotFather
+
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
-# Your personal Telegram user ID (get it from @userinfobot)
-# Only this user can run /admin
+
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 
 # ── Schedule ──────────────────────────────────────────────────────────────
 
-# Time to send daily jobs (24-hour format, UTC)
+
 DAILY_HOUR   = int(os.getenv("DAILY_HOUR",   "8"))
 DAILY_MINUTE = int(os.getenv("DAILY_MINUTE", "0"))

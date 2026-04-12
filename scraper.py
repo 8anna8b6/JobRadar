@@ -1,12 +1,5 @@
-"""
-LinkedIn scraper — two-pass approach:
-  Pass 1: search page  → collect job stubs (title, company, location, job_id)
-  Pass 2: job API page → extract the real external apply link + verify recency
-
-Tries last-1-hour jobs first, falls back to last-24-hours if nothing found.
-"""
-
 import re
+import json
 import time
 import random
 import logging
@@ -31,6 +24,9 @@ HEADERS = {
     ),
     "Accept-Language": "en-US,en;q=0.9",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Referer": "https://www.linkedin.com/jobs/search/",
+    "sec-fetch-site": "same-origin",
+    "sec-fetch-mode": "navigate",
 }
 
 SESSION = requests.Session()
@@ -64,6 +60,11 @@ def api_url(job_id: str) -> str:
     return f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
 
 
+def public_url(job_id: str) -> str:
+    """Public LinkedIn job post page."""
+    return f"https://www.linkedin.com/jobs/view/{job_id}/"
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 def extract_job_id(url: str) -> str | None:
@@ -83,6 +84,14 @@ def fetch_page(url: str) -> BeautifulSoup | None:
     except requests.RequestException as e:
         logger.warning(f"Fetch failed [{url}]: {e}")
         return None
+
+
+def _is_external(href: str) -> bool:
+    """Return True if the URL is a real external (non-LinkedIn) apply link."""
+    if not href or not href.startswith("http"):
+        return False
+    blocked = ["linkedin.com/jobs", "linkedin.com/login", "linkedin.com/authwall"]
+    return not any(b in href for b in blocked)
 
 
 # ── Pass 1: search page → job stubs ──────────────────────────────────────
@@ -117,10 +126,10 @@ def parse_search_page(soup: BeautifulSoup, seen_ids: set) -> list[dict]:
             location = location_el.get_text(strip=True) if location_el else "Israel"
 
             stubs.append({
-                "job_id":      job_id,
-                "title":       title,
-                "company":     company,
-                "location":    location,
+                "job_id":       job_id,
+                "title":        title,
+                "company":      company,
+                "location":     location,
                 "linkedin_url": linkedin_url,
             })
         except Exception as e:
@@ -129,41 +138,122 @@ def parse_search_page(soup: BeautifulSoup, seen_ids: set) -> list[dict]:
     return stubs
 
 
-# ── Pass 2: job API page → real apply link ────────────────────────────────
+# ── Pass 2: multi-source apply link extraction ────────────────────────────
 
 def get_apply_link(job_id: str) -> str | None:
     """
-    Fetch the LinkedIn guest API page for this job and extract
-    the external apply button URL (company's own careers page / ATS).
+    Try multiple sources in order to find the real external apply URL.
 
-    Returns the direct apply URL, or None if not found.
+    Source 1 — Guest API page (lightweight, often has <a class="apply-button">)
+    Source 2 — Public job post page (has embedded JSON with companyApplyUrl,
+               which is what powers the artdeco apply button in the browser)
+
+    Returns the direct company apply URL, or None if only Easy Apply is available.
     """
-    soup = fetch_page(api_url(job_id))
-    if not soup:
-        return None
 
-    # Primary: the "Apply" button with an external href
-    # LinkedIn renders it as <a class="apply-button" href="https://...">
-    for selector in [
-        "a.apply-button--link",
-        "a[data-tracking-control-name='public_jobs_apply-link-offsite_sign-up-modal']",
-        "a[data-tracking-control-name='public_jobs_apply-link-offsite']",
-        "a.apply-button",
-    ]:
-        el = soup.select_one(selector)
-        if el and el.get("href", "").startswith("http"):
-            href = el["href"]
-            # Filter out LinkedIn-internal redirect loops
-            if "linkedin.com/jobs" not in href and "linkedin.com/login" not in href:
+    # ── Source 1: Guest API ───────────────────────────────────────────────
+    soup = fetch_page(api_url(job_id))
+    if soup:
+        # Named selectors for the apply anchor
+        for selector in [
+            "a.apply-button--link",
+            "a[data-tracking-control-name='public_jobs_apply-link-offsite_sign-up-modal']",
+            "a[data-tracking-control-name='public_jobs_apply-link-offsite']",
+            "a.apply-button",
+        ]:
+            el = soup.select_one(selector)
+            if el:
+                href = el.get("href", "")
+                if _is_external(href):
+                    logger.debug(f"[{job_id}] Found via guest API selector: {href}")
+                    return href
+
+        # Generic fallback: any <a> with "apply" in its text pointing off-LinkedIn
+        for a in soup.find_all("a", href=True):
+            text = a.get_text(strip=True).lower()
+            href = a["href"]
+            if "apply" in text and _is_external(href):
+                logger.debug(f"[{job_id}] Found via guest API text fallback: {href}")
                 return href
 
-    # Fallback: any <a> whose text says "Apply" pointing off-LinkedIn
-    for a in soup.find_all("a", href=True):
-        text = a.get_text(strip=True).lower()
-        href = a["href"]
-        if "apply" in text and href.startswith("http") and "linkedin.com" not in href:
-            return href
+    # ── Source 2: Public job post page ────────────────────────────────────
+    # The artdeco <button id="jobs-apply-button-id"> is rendered by Ember.js;
+    # the real URL lives inside embedded <script type="application/json"> blobs.
+    time.sleep(random.uniform(0.8, 1.5))  # polite gap before second request
+    soup2 = fetch_page(public_url(job_id))
+    if not soup2:
+        return None
 
+    # Strategy A: scan all <script type="application/json"> for companyApplyUrl
+    for script in soup2.find_all("script", type="application/json"):
+        try:
+            raw = script.string or ""
+            if not raw.strip():
+                continue
+
+            # Quick string check before expensive JSON parse
+            if "companyApplyUrl" not in raw and "applyMethod" not in raw:
+                continue
+
+            data = json.loads(raw)
+            url = _dig_apply_url(data)
+            if url and _is_external(url):
+                logger.debug(f"[{job_id}] Found via JSON companyApplyUrl: {url}")
+                return url
+        except Exception:
+            continue
+
+    # Strategy B: regex over all inline scripts for any obvious apply URL
+    for script in soup2.find_all("script"):
+        raw = script.string or ""
+        if "applyUrl" not in raw and "companyApplyUrl" not in raw and "externalApplyLink" not in raw:
+            continue
+        # Look for the value after known keys
+        for pattern in [
+            r'"companyApplyUrl"\s*:\s*"(https?://[^"]+)"',
+            r'"applyUrl"\s*:\s*"(https?://[^"]+)"',
+            r'"externalApplyLink"\s*:\s*"(https?://[^"]+)"',
+        ]:
+            match = re.search(pattern, raw)
+            if match:
+                href = match.group(1).replace("\\u0026", "&").replace("\\/", "/")
+                if _is_external(href):
+                    logger.debug(f"[{job_id}] Found via script regex: {href}")
+                    return href
+
+    # Strategy C: check if the apply button's parent is an <a> tag
+    btn = soup2.find(id="jobs-apply-button-id")
+    if btn:
+        parent = btn.find_parent("a", href=True)
+        if parent and _is_external(parent["href"]):
+            logger.debug(f"[{job_id}] Found via button parent <a>: {parent['href']}")
+            return parent["href"]
+
+    logger.debug(f"[{job_id}] No external apply link found (likely Easy Apply only)")
+    return None
+
+
+def _dig_apply_url(obj, depth: int = 0) -> str | None:
+    """
+    Recursively walk a parsed JSON object looking for companyApplyUrl
+    or applyMethod.easyApplyUrl / companyApplyUrl keys.
+    Limit recursion depth to avoid infinite loops on huge blobs.
+    """
+    if depth > 8:
+        return None
+    if isinstance(obj, dict):
+        for key in ("companyApplyUrl", "applyUrl", "externalApplyLink"):
+            if key in obj and isinstance(obj[key], str) and obj[key].startswith("http"):
+                return obj[key]
+        for v in obj.values():
+            result = _dig_apply_url(v, depth + 1)
+            if result:
+                return result
+    elif isinstance(obj, list):
+        for item in obj:
+            result = _dig_apply_url(item, depth + 1)
+            if result:
+                return result
     return None
 
 
@@ -179,7 +269,8 @@ def scrape_one_role(
     """
     Scrape one role keyword, two-pass:
       1. Collect stubs from search page
-      2. Fetch real apply link for each stub from the job API
+      2. Fetch real apply link for each stub
+      3. SKIP any job that has no direct external apply link (Easy Apply only)
     """
     results = []
 
@@ -198,17 +289,22 @@ def scrape_one_role(
             if len(results) >= per_role_limit:
                 break
 
+            seen_ids.add(stub["job_id"])  # mark as seen regardless of outcome
+
             apply_link = get_apply_link(stub["job_id"])
 
+            # ✅ Only include jobs with a real external apply link
+            if not apply_link:
+                logger.debug(f"Skipping {stub['title']} @ {stub['company']} — no direct link")
+                continue
+
             results.append({
-                "title":    stub["title"],
-                "company":  stub["company"],
-                "location": stub["location"],
-                # Use the real apply link if found, otherwise fall back to LinkedIn post
-                "url": apply_link or stub["linkedin_url"],
-                "has_direct_link": apply_link is not None,
+                "title":           stub["title"],
+                "company":         stub["company"],
+                "location":        stub["location"],
+                "url":             apply_link,
+                "has_direct_link": True,
             })
-            seen_ids.add(stub["job_id"])
 
             # Polite delay between API calls
             time.sleep(random.uniform(1.0, 2.0))
@@ -234,7 +330,7 @@ def scrape_jobs_multi(
       - First try last-1-hour jobs (freshest possible)
       - If total results < 5, fall back to last-24-hours
 
-    Returns up to `limit` unique jobs, deduplicated across all roles.
+    Returns up to `limit` unique jobs, all with direct company apply links.
     """
     codes = [SENIORITY_CODES[s] for s in seniority_keys if s in SENIORITY_CODES]
     if not codes:
@@ -262,7 +358,5 @@ def scrape_jobs_multi(
         logger.info(f"Only {len(jobs)} jobs in last hour — falling back to last 24 hours")
         jobs = run_scrape("r86400")
 
-    direct = sum(1 for j in jobs if j.get("has_direct_link"))
-    logger.info(f"Scraped {len(jobs)} jobs total | {direct} with direct apply links")
-
+    logger.info(f"Scraped {len(jobs)} jobs total — all with direct apply links")
     return jobs

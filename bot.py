@@ -1,6 +1,7 @@
 """
 LinkedIn Jobs Telegram Bot — JobRadar
 Multi-select seniority + roles, immediate first scrape, daily at 1am Israel time.
+Direct company apply links via two-pass scraping.
 """
 
 import logging
@@ -39,41 +40,42 @@ SENIORITY_OPTIONS = [
 ]
 
 ROLE_OPTIONS = [
-    ("Software Engineer",      "software_engineer"),
-    ("Frontend Developer",     "frontend_developer"),
-    ("Backend Developer",      "backend_developer"),
-    ("Full Stack Developer",   "fullstack_developer"),
-    ("Mobile Developer",       "mobile_developer"),
-    ("Data Scientist",         "data_scientist"),
-    ("Data Analyst",           "data_analyst"),
-    ("ML Engineer",            "ml_engineer"),
-    ("DevOps / SRE",           "devops_sre"),
-    ("QA Engineer",            "qa_engineer"),
-    ("Product Manager",        "product_manager"),
-    ("UX / UI Designer",       "ux_ui_designer"),
-    ("Cybersecurity",          "cybersecurity"),
-    ("Data Engineer",          "data_engineer"),
-    ("Cloud Engineer",         "cloud_engineer"),
+    ("Software Engineer",    "software_engineer"),
+    ("Frontend Developer",   "frontend_developer"),
+    ("Backend Developer",    "backend_developer"),
+    ("Full Stack Developer", "fullstack_developer"),
+    ("Mobile Developer",     "mobile_developer"),
+    ("Data Scientist",       "data_scientist"),
+    ("Data Analyst",         "data_analyst"),
+    ("ML Engineer",          "ml_engineer"),
+    ("DevOps / SRE",         "devops_sre"),
+    ("QA Engineer",          "qa_engineer"),
+    ("Product Manager",      "product_manager"),
+    ("UX / UI Designer",     "ux_ui_designer"),
+    ("Cybersecurity",        "cybersecurity"),
+    ("Data Engineer",        "data_engineer"),
+    ("Cloud Engineer",       "cloud_engineer"),
 ]
 
-# Mapping key → search keyword used on LinkedIn
 ROLE_KEYWORDS = {
-    "software_engineer":    "Software Engineer",
-    "frontend_developer":   "Frontend Developer",
-    "backend_developer":    "Backend Developer",
-    "fullstack_developer":  "Full Stack Developer",
-    "mobile_developer":     "Mobile Developer",
-    "data_scientist":       "Data Scientist",
-    "data_analyst":         "Data Analyst",
-    "ml_engineer":          "Machine Learning Engineer",
-    "devops_sre":           "DevOps",
-    "qa_engineer":          "QA Engineer",
-    "product_manager":      "Product Manager",
-    "ux_ui_designer":       "UX Designer",
-    "cybersecurity":        "Cybersecurity",
-    "data_engineer":        "Data Engineer",
-    "cloud_engineer":       "Cloud Engineer",
+    "software_engineer":   "Software Engineer",
+    "frontend_developer":  "Frontend Developer",
+    "backend_developer":   "Backend Developer",
+    "fullstack_developer": "Full Stack Developer",
+    "mobile_developer":    "Mobile Developer",
+    "data_scientist":      "Data Scientist",
+    "data_analyst":        "Data Analyst",
+    "ml_engineer":         "Machine Learning Engineer",
+    "devops_sre":          "DevOps",
+    "qa_engineer":         "QA Engineer",
+    "product_manager":     "Product Manager",
+    "ux_ui_designer":      "UX Designer",
+    "cybersecurity":       "Cybersecurity",
+    "data_engineer":       "Data Engineer",
+    "cloud_engineer":      "Cloud Engineer",
 }
+
+ROLE_LABEL = dict(ROLE_OPTIONS)
 
 db = Database()
 
@@ -111,7 +113,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         f"👋 *Welcome to JobRadar, {user.first_name}!*\n\n"
-        "I scan LinkedIn Israel every day and send you fresh job listings straight to Telegram.\n\n"
+        "I scan LinkedIn Israel every morning and send you the freshest job listings — "
+        "with *direct links to apply on the company's website*.\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "*Step 1 of 2 — Seniority Level*\n"
         "Select all levels that apply to you:\n"
@@ -135,7 +138,6 @@ async def seniority_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not selected:
             await query.answer("⚠️ Please select at least one level.", show_alert=True)
             return CHOOSING_SENIORITY
-
         context.user_data["roles"] = []
         await query.edit_message_text(
             "━━━━━━━━━━━━━━━━━━━━\n"
@@ -154,7 +156,6 @@ async def seniority_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         selected.append(key)
     context.user_data["seniority"] = selected
-
     await query.edit_message_reply_markup(reply_markup=seniority_keyboard(selected))
     return CHOOSING_SENIORITY
 
@@ -174,17 +175,17 @@ async def role_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.set_preferences(query.from_user.id, json.dumps(selected_sen), json.dumps(selected_roles))
         db.set_active(query.from_user.id, True)
 
-        sen_display   = "  " + " · ".join(s.capitalize() for s in selected_sen)
-        roles_display = "\n".join(f"  • {dict(ROLE_OPTIONS).get(r, r)}" for r in selected_roles)
+        sen_display   = " · ".join(s.capitalize() for s in selected_sen)
+        roles_display = "\n".join(f"  • {ROLE_LABEL.get(r, r)}" for r in selected_roles)
 
         await query.edit_message_text(
             "🎉 *Profile saved!*\n\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 *Seniority:*\n{sen_display}\n\n"
+            f"📊 *Seniority:* {sen_display}\n\n"
             f"💼 *Roles:*\n{roles_display}\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             "🔍 Scanning LinkedIn for your first matches...\n"
-            "_This takes about 15 seconds_",
+            "_This takes about 20–30 seconds_",
             parse_mode="Markdown",
         )
 
@@ -200,7 +201,6 @@ async def role_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         selected.append(key)
     context.user_data["roles"] = selected
-
     await query.edit_message_reply_markup(reply_markup=roles_keyboard(selected))
     return CHOOSING_ROLES
 
@@ -215,48 +215,13 @@ async def run_first_scrape(bot, user_id: int, seniorities: list, roles: list):
                 chat_id=user_id,
                 text=(
                     "🔍 *First scan complete*\n\n"
-                    "No matching jobs found on LinkedIn right now.\n"
-                    "I'll check again tonight at *1:00 AM* 🌙\n\n"
-                    "You can also use /fetch to try again manually."
+                    "No matching jobs found on LinkedIn right now — the market may be quiet today.\n\n"
+                    "I'll send your first batch tonight at *1:00 AM* 🌙"
                 ),
                 parse_mode="Markdown"
             )
     except Exception as e:
         logger.error(f"First scrape failed for {user_id}: {e}")
-
-
-# ── /fetch ────────────────────────────────────────────────────────────────
-
-async def fetch_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    prefs = db.get_preferences(user_id)
-
-    if not prefs:
-        await update.message.reply_text(
-            "⚙️ *No profile found.*\n\nUse /start to set up your preferences first.",
-            parse_mode="Markdown"
-        )
-        return
-
-    seniorities, roles = prefs
-    msg = await update.message.reply_text(
-        "🔍 *Scanning LinkedIn for fresh jobs...*\n"
-        "_This usually takes 10–20 seconds_",
-        parse_mode="Markdown"
-    )
-
-    jobs = await asyncio.to_thread(scrape_jobs_multi, roles, seniorities, ROLE_KEYWORDS, limit=15)
-
-    if not jobs:
-        await msg.edit_text(
-            "😕 *No jobs found right now.*\n\n"
-            "LinkedIn might be quiet today — try again later\nor broaden your roles with /update.",
-            parse_mode="Markdown"
-        )
-        return
-
-    await msg.delete()
-    await send_jobs_to_user(context.bot, user_id, jobs)
 
 
 # ── /stop ─────────────────────────────────────────────────────────────────
@@ -286,9 +251,9 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     seniorities, roles = prefs
-    state = "🟢 Active" if is_active else "⏸ Paused"
+    state         = "🟢 Active" if is_active else "⏸ Paused"
     sen_display   = " · ".join(s.capitalize() for s in seniorities)
-    roles_display = "\n".join(f"  • {dict(ROLE_OPTIONS).get(r, r)}" for r in roles)
+    roles_display = "\n".join(f"  • {ROLE_LABEL.get(r, r)}" for r in roles)
 
     await update.message.reply_text(
         "📋 *Your JobRadar Profile*\n\n"
@@ -298,8 +263,6 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📡 *Status:* {state}\n"
         f"🕐 *Daily send:* 1:00 AM Israel time\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Commands:\n"
-        "/fetch — get jobs right now\n"
         "/update — change your preferences\n"
         "/stop — pause daily updates",
         parse_mode="Markdown"
@@ -321,7 +284,7 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     stats = db.get_stats()
     top_roles = "\n".join(
-        f"  • {dict(ROLE_OPTIONS).get(r, r)}: {c}" for r, c in stats["top_roles"]
+        f"  • {ROLE_LABEL.get(r, r)}: {c}" for r, c in stats["top_roles"]
     ) or "  None yet"
     sen_dist = "\n".join(
         f"  • {s.capitalize()}: {c}" for s, c in stats["seniority_dist"]
@@ -342,22 +305,21 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Job message sender ────────────────────────────────────────────────────
 
 async def send_jobs_to_user(bot, user_id: int, jobs: list, is_first: bool = False):
-    if is_first:
-        header = "🎉 *Your first job matches are here!*"
-    else:
-        header = "🌅 *Good morning! Fresh jobs just for you:*"
+    header = "🎉 *Your first job matches are here!*" if is_first else "🌅 *Good morning! Fresh jobs just for you:*"
 
     await bot.send_message(
         chat_id=user_id,
         text=(
             f"{header}\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            f"Found *{len(jobs)}* matching positions on LinkedIn 🇮🇱"
+            f"Found *{len(jobs)}* matching positions 🇮🇱\n"
+            "_All links go directly to the company's application page_"
         ),
         parse_mode="Markdown"
     )
 
     for i, job in enumerate(jobs, 1):
+        link_label = "Apply Directly →" if job.get("has_direct_link") else "View on LinkedIn →"
         try:
             await bot.send_message(
                 chat_id=user_id,
@@ -365,7 +327,7 @@ async def send_jobs_to_user(bot, user_id: int, jobs: list, is_first: bool = Fals
                     f"*{i}.* *{job['title']}*\n"
                     f"🏢  {job['company']}\n"
                     f"📍  {job['location']}\n"
-                    f"🔗  [View & Apply]({job['url']})"
+                    f"🔗  [{link_label}]({job['url']})"
                 ),
                 parse_mode="Markdown",
                 disable_web_page_preview=True
@@ -379,7 +341,6 @@ async def send_jobs_to_user(bot, user_id: int, jobs: list, is_first: bool = Fals
         text=(
             "━━━━━━━━━━━━━━━━━━━━\n"
             "💪 *Good luck with your applications!*\n\n"
-            "/fetch — refresh anytime\n"
             "/update — change preferences\n"
             "/stop — pause daily alerts"
         ),
@@ -406,8 +367,7 @@ async def daily_send(app: Application):
                     text=(
                         "🌅 *Good morning!*\n\n"
                         "No new matching jobs were posted in the last 24 hours.\n"
-                        "I'll check again tomorrow at *1:00 AM* 🌙\n\n"
-                        "You can also /fetch manually anytime."
+                        "I'll check again tomorrow at *1:00 AM* 🌙"
                     ),
                     parse_mode="Markdown"
                 )
@@ -420,9 +380,7 @@ async def daily_send(app: Application):
 # ── cancel ────────────────────────────────────────────────────────────────
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "❌ Setup cancelled.\nSend /start whenever you're ready."
-    )
+    await update.message.reply_text("❌ Setup cancelled.\nSend /start whenever you're ready.")
     return ConversationHandler.END
 
 
@@ -445,7 +403,6 @@ def main():
     )
 
     app.add_handler(conv_handler)
-    app.add_handler(CommandHandler("fetch",  fetch_now))
     app.add_handler(CommandHandler("stop",   stop))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("admin",  admin_stats))

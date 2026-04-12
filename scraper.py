@@ -1,6 +1,6 @@
 """
 LinkedIn scraper — extracts title, company, location, apply link.
-Uses requests + BeautifulSoup (no Selenium/Chrome needed).
+Supports multiple roles and multiple seniority levels per user.
 """
 
 import time
@@ -11,12 +11,12 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-# Seniority → LinkedIn f_E filter codes
-SENIORITY_FILTERS = {
-    "intern":  "1",   # Internship
-    "junior":  "2",   # Entry level
-    "mid":     "3",   # Associate
-    "senior":  "4",   # Mid-Senior level
+# Seniority key → LinkedIn f_E filter code
+SENIORITY_CODES = {
+    "intern":  "1",
+    "junior":  "2",
+    "mid":     "3",
+    "senior":  "4",
 }
 
 HEADERS = {
@@ -33,16 +33,16 @@ SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
 
-def build_search_url(keyword: str, seniority: str, offset: int = 0) -> str:
-    level_code = SENIORITY_FILTERS.get(seniority, "2")
+def build_search_url(keyword: str, seniority_codes: list, offset: int = 0) -> str:
     kw = keyword.replace(" ", "%20")
+    level_param = "%2C".join(seniority_codes)  # e.g. "2%2C3" for junior+mid
     return (
         f"https://il.linkedin.com/jobs/search/"
         f"?keywords={kw}"
         f"&location=Israel"
-        f"&f_E={level_code}"
+        f"&f_E={level_param}"
         f"&sortBy=DD"
-        f"&f_TPR=r86400"   # Posted in last 24 hours
+        f"&f_TPR=r86400"
         f"&start={offset}"
     )
 
@@ -95,18 +95,15 @@ def parse_jobs(soup: BeautifulSoup) -> list[dict]:
     return jobs
 
 
-def scrape_jobs(keyword: str, seniority: str, limit: int = 10) -> list[dict]:
-    """
-    Scrape LinkedIn for jobs matching keyword + seniority.
-    Returns list of dicts: {title, company, location, url}
-    """
+def scrape_one_role(keyword: str, seniority_codes: list, limit: int = 10) -> list[dict]:
+    """Scrape one role keyword across the given seniority codes."""
     all_jobs = []
     seen_urls = set()
 
-    for page in range(2):  # 2 pages max (25 results each)
+    for page in range(2):
         offset = page * 25
-        url = build_search_url(keyword, seniority, offset)
-        logger.info(f"Scraping page {page+1}: {url}")
+        url = build_search_url(keyword, seniority_codes, offset)
+        logger.info(f"Scraping '{keyword}' page {page+1}")
 
         soup = fetch_page(url)
         if not soup:
@@ -114,7 +111,6 @@ def scrape_jobs(keyword: str, seniority: str, limit: int = 10) -> list[dict]:
 
         jobs = parse_jobs(soup)
         if not jobs:
-            logger.info(f"No jobs on page {page+1}, stopping.")
             break
 
         for job in jobs:
@@ -125,8 +121,44 @@ def scrape_jobs(keyword: str, seniority: str, limit: int = 10) -> list[dict]:
         if len(all_jobs) >= limit:
             break
 
-        # Polite delay between pages
-        time.sleep(random.uniform(1.5, 3.0))
+        time.sleep(random.uniform(1.5, 2.5))
 
-    logger.info(f"Scraped {len(all_jobs)} unique jobs for '{keyword}' ({seniority})")
+    return all_jobs[:limit]
+
+
+def scrape_jobs_multi(
+    role_keys: list,
+    seniority_keys: list,
+    role_keywords_map: dict,
+    limit: int = 15,
+) -> list[dict]:
+    """
+    Scrape multiple roles + multiple seniority levels.
+    Deduplicates across all role searches.
+    Returns up to `limit` unique jobs total.
+    """
+    # Convert seniority keys to LinkedIn codes
+    codes = [SENIORITY_CODES[s] for s in seniority_keys if s in SENIORITY_CODES]
+    if not codes:
+        codes = ["2"]  # default to junior
+
+    all_jobs = []
+    seen_urls = set()
+
+    for role_key in role_keys:
+        keyword = role_keywords_map.get(role_key, role_key.replace("_", " ").title())
+        jobs = scrape_one_role(keyword, codes, limit=8)
+
+        for job in jobs:
+            if job["url"] not in seen_urls:
+                seen_urls.add(job["url"])
+                all_jobs.append(job)
+
+        if len(all_jobs) >= limit:
+            break
+
+        # Polite delay between different role searches
+        time.sleep(random.uniform(1.0, 2.0))
+
+    logger.info(f"Total scraped: {len(all_jobs)} unique jobs across {len(role_keys)} roles")
     return all_jobs[:limit]

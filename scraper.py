@@ -1,12 +1,3 @@
-"""
-LinkedIn scraper — two-pass approach:
-  Pass 1: search page  → collect job stubs (title, company, location, job_id)
-  Pass 2: job API page → extract the real external apply link + verify recency
-
-Tries last-1-hour jobs first, falls back to last-24-hours if nothing found.
-Only jobs with a REAL direct apply link are returned — no LinkedIn post fallbacks.
-"""
-
 import re
 import json
 import time
@@ -41,6 +32,9 @@ HEADERS = {
 
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
+
+GUEST_SESSION = requests.Session()
+GUEST_SESSION.headers.update(HEADERS)
 
 
 # ── URL builders ──────────────────────────────────────────────────────────
@@ -86,9 +80,10 @@ def extract_job_id(url: str) -> str | None:
     return match.group(1) if match else None
 
 
-def fetch_page(url: str) -> BeautifulSoup | None:
+def fetch_page(url: str, use_auth: bool = False) -> BeautifulSoup | None:
+    session = SESSION if use_auth else GUEST_SESSION
     try:
-        resp = SESSION.get(url, timeout=15)
+        resp = session.get(url, timeout=15)
         resp.raise_for_status()
         return BeautifulSoup(resp.text, "html.parser")
     except requests.RequestException as e:
@@ -305,16 +300,15 @@ def scrape_one_role(
 ) -> list[dict]:
     """
     Scrape one role keyword, two-pass:
-      1. Collect stubs from search page
-      2. Fetch real apply link for each stub
-      3. SKIP any job that has no direct external apply link (Easy Apply only)
+      1. Collect stubs from the guest search page
+      2. Always include the job with its LinkedIn URL — simple and reliable
     """
     results = []
 
     for page in range(2):  # up to 2 pages per role
         offset = page * 25
         url = search_url(keyword, seniority_codes, time_filter, offset)
-        soup = fetch_page(url)
+        soup = fetch_page(url)  # uses GUEST_SESSION — no cookie, gets simple HTML
         if not soup:
             break
 
@@ -326,25 +320,14 @@ def scrape_one_role(
             if len(results) >= per_role_limit:
                 break
 
-            seen_ids.add(stub["job_id"])  # mark as seen regardless of outcome
-
-            apply_link = get_apply_link(stub["job_id"])
-
-            # ✅ Only include jobs with a real external apply link
-            if not apply_link:
-                logger.debug(f"Skipping {stub['title']} @ {stub['company']} — no direct link")
-                continue
+            seen_ids.add(stub["job_id"])
 
             results.append({
-                "title":           stub["title"],
-                "company":         stub["company"],
-                "location":        stub["location"],
-                "url":             apply_link,
-                "has_direct_link": True,
+                "title":    stub["title"],
+                "company":  stub["company"],
+                "location": stub["location"],
+                "url":      stub["linkedin_url"],
             })
-
-            # Polite delay between API calls
-            time.sleep(random.uniform(1.0, 2.0))
 
         if len(results) >= per_role_limit:
             break
@@ -395,5 +378,5 @@ def scrape_jobs_multi(
         logger.info(f"Only {len(jobs)} jobs in last hour — falling back to last 24 hours")
         jobs = run_scrape("r86400")
 
-    logger.info(f"Scraped {len(jobs)} jobs total — all with direct apply links")
+    logger.info(f"Scraped {len(jobs)} jobs total")
     return jobs

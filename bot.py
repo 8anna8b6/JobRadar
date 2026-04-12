@@ -1,9 +1,3 @@
-"""
-LinkedIn Jobs Telegram Bot — JobRadar
-Multi-select seniority + roles, immediate first scrape, daily at 1am Israel time.
-Direct company apply links via two-pass scraping.
-"""
-
 import logging
 import asyncio
 import json
@@ -125,6 +119,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"👋 *Welcome to JobRadar, {user.first_name}!*\n\n"
         "I scan LinkedIn Israel every day and send you the freshest job listings\n\n"
+
         "━━━━━━━━━━━━━━━━━━━━\n"
         "*Step 1 of 2 — Seniority Level*\n"
         "Select all levels that apply to you:\n"
@@ -323,13 +318,12 @@ async def send_jobs_to_user(bot, user_id: int, jobs: list, is_first: bool = Fals
             f"{header}\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"Found *{len(jobs)}* matching positions 🇮🇱\n"
-            "_All links go directly to the company's application page_"
+            "_Click any link to view and apply on LinkedIn_"
         ),
         parse_mode="Markdown"
     )
 
     for i, job in enumerate(jobs, 1):
-        link_label = "Apply Directly →" if job.get("has_direct_link") else "View on LinkedIn →"
         try:
             await bot.send_message(
                 chat_id=user_id,
@@ -337,7 +331,7 @@ async def send_jobs_to_user(bot, user_id: int, jobs: list, is_first: bool = Fals
                     f"*{i}.* *{job['title']}*\n"
                     f"🏢  {job['company']}\n"
                     f"📍  {job['location']}\n"
-                    f"🔗  [{link_label}]({job['url']})"
+                    f"🔗  [View & Apply →]({job['url']})"
                 ),
                 parse_mode="Markdown",
                 disable_web_page_preview=True

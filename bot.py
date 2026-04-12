@@ -1,3 +1,9 @@
+"""
+LinkedIn Jobs Telegram Bot — JobRadar
+Multi-select seniority + roles, immediate first scrape, daily at 1am Israel time.
+Direct company apply links via two-pass scraping.
+"""
+
 import logging
 import asyncio
 import json
@@ -42,6 +48,7 @@ ROLE_OPTIONS = [
     ("Data Scientist",       "data_scientist"),
     ("Data Analyst",         "data_analyst"),
     ("ML Engineer",          "ml_engineer"),
+    ("AI / GenAI Engineer",  "ai_engineer"),
     ("DevOps / SRE",         "devops_sre"),
     ("QA Engineer",          "qa_engineer"),
     ("Product Manager",      "product_manager"),
@@ -49,6 +56,10 @@ ROLE_OPTIONS = [
     ("Cybersecurity",        "cybersecurity"),
     ("Data Engineer",        "data_engineer"),
     ("Cloud Engineer",       "cloud_engineer"),
+    ("Embedded / Firmware",  "embedded_engineer"),
+    ("Game Developer",       "game_developer"),
+    ("Business Analyst",     "business_analyst"),
+    ("Network Engineer",     "network_engineer"),
 ]
 
 ROLE_KEYWORDS = {
@@ -60,6 +71,7 @@ ROLE_KEYWORDS = {
     "data_scientist":      "Data Scientist",
     "data_analyst":        "Data Analyst",
     "ml_engineer":         "Machine Learning Engineer",
+    "ai_engineer":         "AI Engineer",
     "devops_sre":          "DevOps",
     "qa_engineer":         "QA Engineer",
     "product_manager":     "Product Manager",
@@ -67,9 +79,14 @@ ROLE_KEYWORDS = {
     "cybersecurity":       "Cybersecurity",
     "data_engineer":       "Data Engineer",
     "cloud_engineer":      "Cloud Engineer",
+    "embedded_engineer":   "Embedded Software Engineer",
+    "game_developer":      "Game Developer",
+    "business_analyst":    "Business Analyst",
+    "network_engineer":    "Network Engineer",
 }
 
-ROLE_LABEL = dict(ROLE_OPTIONS)
+# key → display label (fixed: was reversed before)
+ROLE_LABEL = {key: label for label, key in ROLE_OPTIONS}
 
 db = Database()
 
@@ -107,8 +124,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         f"👋 *Welcome to JobRadar, {user.first_name}!*\n\n"
-        "I scan LinkedIn Israel every morning and send you the freshest job listings — "
-        "with *direct links to apply on the company's website*.\n\n"
+        "I scan LinkedIn Israel every day and send you the freshest job listings\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "*Step 1 of 2 — Seniority Level*\n"
         "Select all levels that apply to you:\n"

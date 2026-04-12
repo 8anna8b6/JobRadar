@@ -1,9 +1,19 @@
+"""
+LinkedIn scraper — two-pass approach:
+  Pass 1: search page  → collect job stubs (title, company, location, job_id)
+  Pass 2: job API page → extract the real external apply link + verify recency
+
+Tries last-1-hour jobs first, falls back to last-24-hours if nothing found.
+Only jobs with a REAL direct apply link are returned — no LinkedIn post fallbacks.
+"""
+
 import re
 import json
 import time
 import random
 import logging
 import requests
+from urllib.parse import urlparse, parse_qs, unquote
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
@@ -140,94 +150,121 @@ def parse_search_page(soup: BeautifulSoup, seen_ids: set) -> list[dict]:
 
 # ── Pass 2: multi-source apply link extraction ────────────────────────────
 
+def _unwrap_safety_url(href: str) -> str:
+    """
+    LinkedIn wraps external apply links in a safety redirect:
+      https://www.linkedin.com/safety/go/?url=https%3A%2F%2F...&urlhash=...
+    This function extracts and URL-decodes the real destination URL.
+    If the href is not a safety redirect, returns it unchanged.
+    """
+    if "linkedin.com/safety/go" in href:
+        try:
+            params = parse_qs(urlparse(href).query)
+            real = params.get("url", [None])[0]
+            if real:
+                return unquote(real)
+        except Exception:
+            pass
+    return href
+
+
 def get_apply_link(job_id: str) -> str | None:
     """
     Try multiple sources in order to find the real external apply URL.
 
-    Source 1 — Guest API page (lightweight, often has <a class="apply-button">)
-    Source 2 — Public job post page (has embedded JSON with companyApplyUrl,
-               which is what powers the artdeco apply button in the browser)
+    Source 1 — Public job post page
+                → <a aria-label="Apply on company website"> with a
+                  linkedin.com/safety/go/?url=REAL_URL redirect href.
+                  This is exactly what the browser renders.
+
+    Source 2 — Guest API page (lightweight fallback)
 
     Returns the direct company apply URL, or None if only Easy Apply is available.
     """
 
-    # ── Source 1: Guest API ───────────────────────────────────────────────
-    soup = fetch_page(api_url(job_id))
+    # ── Source 1: Public job post page ───────────────────────────────────
+    # LinkedIn wraps the real URL in: /safety/go/?url=<encoded_real_url>
+    # The <a> tag always has aria-label="Apply on company website"
+    time.sleep(random.uniform(0.5, 1.0))
+    soup = fetch_page(public_url(job_id))
     if soup:
-        # Named selectors for the apply anchor
+        # Primary: aria-label targets the exact button we see in the browser
+        el = soup.find("a", attrs={"aria-label": "Apply on company website"})
+        if el:
+            href = el.get("href", "")
+            real = _unwrap_safety_url(href)
+            if _is_external(real):
+                logger.debug(f"[{job_id}] Found via aria-label (public page): {real}")
+                return real
+
+        # Fallback A: any <a> whose href contains /safety/go/ and points off-LinkedIn
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if "linkedin.com/safety/go" in href:
+                real = _unwrap_safety_url(href)
+                if _is_external(real):
+                    logger.debug(f"[{job_id}] Found via safety/go scan: {real}")
+                    return real
+
+        # Fallback B: scan embedded JSON blobs for companyApplyUrl
+        for script in soup.find_all("script", type="application/json"):
+            try:
+                raw = script.string or ""
+                if "companyApplyUrl" not in raw and "applyMethod" not in raw:
+                    continue
+                data = json.loads(raw)
+                url = _dig_apply_url(data)
+                if url:
+                    real = _unwrap_safety_url(url)
+                    if _is_external(real):
+                        logger.debug(f"[{job_id}] Found via JSON blob: {real}")
+                        return real
+            except Exception:
+                continue
+
+        # Fallback C: regex over inline scripts
+        for script in soup.find_all("script"):
+            raw = script.string or ""
+            if "companyApplyUrl" not in raw and "applyUrl" not in raw:
+                continue
+            for pattern in [
+                r'"companyApplyUrl"\s*:\s*"(https?://[^"]+)"',
+                r'"applyUrl"\s*:\s*"(https?://[^"]+)"',
+            ]:
+                match = re.search(pattern, raw)
+                if match:
+                    href = match.group(1).replace("\\u0026", "&").replace("\\/", "/")
+                    real = _unwrap_safety_url(href)
+                    if _is_external(real):
+                        logger.debug(f"[{job_id}] Found via script regex: {real}")
+                        return real
+
+    # ── Source 2: Guest API (lightweight second attempt) ──────────────────
+    time.sleep(random.uniform(0.5, 1.0))
+    soup2 = fetch_page(api_url(job_id))
+    if soup2:
         for selector in [
             "a.apply-button--link",
             "a[data-tracking-control-name='public_jobs_apply-link-offsite_sign-up-modal']",
             "a[data-tracking-control-name='public_jobs_apply-link-offsite']",
             "a.apply-button",
         ]:
-            el = soup.select_one(selector)
+            el = soup2.select_one(selector)
             if el:
                 href = el.get("href", "")
-                if _is_external(href):
-                    logger.debug(f"[{job_id}] Found via guest API selector: {href}")
-                    return href
+                real = _unwrap_safety_url(href)
+                if _is_external(real):
+                    logger.debug(f"[{job_id}] Found via guest API selector: {real}")
+                    return real
 
-        # Generic fallback: any <a> with "apply" in its text pointing off-LinkedIn
-        for a in soup.find_all("a", href=True):
+        for a in soup2.find_all("a", href=True):
             text = a.get_text(strip=True).lower()
             href = a["href"]
-            if "apply" in text and _is_external(href):
-                logger.debug(f"[{job_id}] Found via guest API text fallback: {href}")
-                return href
-
-    # ── Source 2: Public job post page ────────────────────────────────────
-    # The artdeco <button id="jobs-apply-button-id"> is rendered by Ember.js;
-    # the real URL lives inside embedded <script type="application/json"> blobs.
-    time.sleep(random.uniform(0.8, 1.5))  # polite gap before second request
-    soup2 = fetch_page(public_url(job_id))
-    if not soup2:
-        return None
-
-    # Strategy A: scan all <script type="application/json"> for companyApplyUrl
-    for script in soup2.find_all("script", type="application/json"):
-        try:
-            raw = script.string or ""
-            if not raw.strip():
-                continue
-
-            # Quick string check before expensive JSON parse
-            if "companyApplyUrl" not in raw and "applyMethod" not in raw:
-                continue
-
-            data = json.loads(raw)
-            url = _dig_apply_url(data)
-            if url and _is_external(url):
-                logger.debug(f"[{job_id}] Found via JSON companyApplyUrl: {url}")
-                return url
-        except Exception:
-            continue
-
-    # Strategy B: regex over all inline scripts for any obvious apply URL
-    for script in soup2.find_all("script"):
-        raw = script.string or ""
-        if "applyUrl" not in raw and "companyApplyUrl" not in raw and "externalApplyLink" not in raw:
-            continue
-        # Look for the value after known keys
-        for pattern in [
-            r'"companyApplyUrl"\s*:\s*"(https?://[^"]+)"',
-            r'"applyUrl"\s*:\s*"(https?://[^"]+)"',
-            r'"externalApplyLink"\s*:\s*"(https?://[^"]+)"',
-        ]:
-            match = re.search(pattern, raw)
-            if match:
-                href = match.group(1).replace("\\u0026", "&").replace("\\/", "/")
-                if _is_external(href):
-                    logger.debug(f"[{job_id}] Found via script regex: {href}")
-                    return href
-
-    # Strategy C: check if the apply button's parent is an <a> tag
-    btn = soup2.find(id="jobs-apply-button-id")
-    if btn:
-        parent = btn.find_parent("a", href=True)
-        if parent and _is_external(parent["href"]):
-            logger.debug(f"[{job_id}] Found via button parent <a>: {parent['href']}")
-            return parent["href"]
+            if "apply" in text:
+                real = _unwrap_safety_url(href)
+                if _is_external(real):
+                    logger.debug(f"[{job_id}] Found via guest API text scan: {real}")
+                    return real
 
     logger.debug(f"[{job_id}] No external apply link found (likely Easy Apply only)")
     return None

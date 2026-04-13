@@ -1,3 +1,4 @@
+
 import logging
 import asyncio
 import json
@@ -34,52 +35,40 @@ SENIORITY_OPTIONS = [
 ]
 
 ROLE_OPTIONS = [
-    ("Software Engineer",    "software_engineer"),
-    ("Frontend Developer",   "frontend_developer"),
-    ("Backend Developer",    "backend_developer"),
-    ("Full Stack Developer", "fullstack_developer"),
-    ("Mobile Developer",     "mobile_developer"),
+    ("Backend",    "backend"),
+    ("Frontend",   "frontend"),
+    ("Full Stack", "fullstack"),
+    ("Mobile",     "mobile"),
     ("Data Scientist",       "data_scientist"),
+    ("Data Engineer",        "data_engineer"),
     ("Data Analyst",         "data_analyst"),
     ("ML Engineer",          "ml_engineer"),
-    ("AI / GenAI Engineer",  "ai_engineer"),
-    ("DevOps / SRE",         "devops_sre"),
-    ("QA Engineer",          "qa_engineer"),
+    ("DevOps",         "devops"),
+    ("Cybersecurity",        "cybersecurity"),
+    ("Embedded Systems",     "embedded"),
+    ("QA / Automation",      "qa_engineer"),
     ("Product Manager",      "product_manager"),
     ("UX / UI Designer",     "ux_ui_designer"),
-    ("Cybersecurity",        "cybersecurity"),
-    ("Data Engineer",        "data_engineer"),
-    ("Cloud Engineer",       "cloud_engineer"),
-    ("Embedded / Firmware",  "embedded_engineer"),
-    ("Game Developer",       "game_developer"),
-    ("Business Analyst",     "business_analyst"),
-    ("Network Engineer",     "network_engineer"),
 ]
 
 ROLE_KEYWORDS = {
-    "software_engineer":   "Software Engineer",
-    "frontend_developer":  "Frontend Developer",
-    "backend_developer":   "Backend Developer",
-    "fullstack_developer": "Full Stack Developer",
-    "mobile_developer":    "Mobile Developer",
+    "backend":   "Backend",
+    "frontend":  "Frontend",
+    "fullstack": "Full Stack",
+    "mobile":    "Mobile",
     "data_scientist":      "Data Scientist",
-    "data_analyst":        "Data Analyst",
-    "ml_engineer":         "Machine Learning Engineer",
-    "ai_engineer":         "AI Engineer",
-    "devops_sre":          "DevOps",
-    "qa_engineer":         "QA Engineer",
-    "product_manager":     "Product Manager",
-    "ux_ui_designer":      "UX Designer",
-    "cybersecurity":       "Cybersecurity",
     "data_engineer":       "Data Engineer",
-    "cloud_engineer":      "Cloud Engineer",
-    "embedded_engineer":   "Embedded Software Engineer",
-    "game_developer":      "Game Developer",
-    "business_analyst":    "Business Analyst",
-    "network_engineer":    "Network Engineer",
+    "data_analyst":        "Data Analyst",
+    "ml_engineer":         "Machine Learning",
+    "devops":          "DevOps",
+    "cybersecurity":       "Cybersecurity",
+    "embedded":   "Embedded",
+    "qa_engineer":         "QA Automation",
+    "product_manager":     "Product Manager",
+    "ux_ui_designer":      "UX UI Designer",
 }
 
-# key → display label (fixed: was reversed before)
+# key → display label
 ROLE_LABEL = {key: label for label, key in ROLE_OPTIONS}
 
 db = Database()
@@ -118,8 +107,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         f"👋 *Welcome to JobRadar, {user.first_name}!*\n\n"
-        "I scan LinkedIn Israel every day and send you the freshest job listings\n\n"
-
+        "I scan LinkedIn Israel every morning and send you the freshest job listings — "
+        "with *direct links to apply on the company's website*.\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "*Step 1 of 2 — Seniority Level*\n"
         "Select all levels that apply to you:\n"
@@ -318,12 +307,13 @@ async def send_jobs_to_user(bot, user_id: int, jobs: list, is_first: bool = Fals
             f"{header}\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"Found *{len(jobs)}* matching positions 🇮🇱\n"
-            "_Click any link to view and apply on LinkedIn_"
+            "_All links go directly to the company's application page_"
         ),
         parse_mode="Markdown"
     )
 
     for i, job in enumerate(jobs, 1):
+        link_label = "Apply Directly →" if job.get("has_direct_link") else "View on LinkedIn →"
         try:
             await bot.send_message(
                 chat_id=user_id,
@@ -331,7 +321,7 @@ async def send_jobs_to_user(bot, user_id: int, jobs: list, is_first: bool = Fals
                     f"*{i}.* *{job['title']}*\n"
                     f"🏢  {job['company']}\n"
                     f"📍  {job['location']}\n"
-                    f"🔗  [View & Apply →]({job['url']})"
+                    f"🔗  [{link_label}]({job['url']})"
                 ),
                 parse_mode="Markdown",
                 disable_web_page_preview=True
